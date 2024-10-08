@@ -1,6 +1,11 @@
 Bit: Bitcoin made easy.
 =======================
 
+## 2024/10/8
+
+- 添加了ltc/doge的支持
+- 内置了oklink的apikey, 主要用于ltc/doge
+
 .. image:: https://img.shields.io/pypi/v/bit.svg?style=flat-square
     :target: https://pypi.org/project/bit
 
