@@ -7,18 +7,11 @@ from bit.curve import x_to_y
 from bit.utils import int_to_unknown_bytes, hex_to_bytes, script_push
 from bit.base32 import bech32_decode
 from bit.constants import (
-    BECH32_MAIN_VERSION_SET,
-    BECH32_TEST_VERSION_SET,
-    MAIN_PUBKEY_HASH,
-    MAIN_SCRIPT_HASH,
-    MAIN_PRIVATE_KEY,
-    TEST_PUBKEY_HASH,
-    TEST_SCRIPT_HASH,
-    TEST_PRIVATE_KEY,
     PUBLIC_KEY_UNCOMPRESSED,
     PUBLIC_KEY_COMPRESSED_EVEN_Y,
     PUBLIC_KEY_COMPRESSED_ODD_Y,
-    PRIVATE_KEY_COMPRESSED_PUBKEY,
+    COINS_INFO_MAP,
+    PREFIX_TO_VERSION,
 )
 
 
@@ -42,27 +35,51 @@ def address_to_public_key_hash(address):
     return b58decode_check(address)[1:]
 
 
+'''get address version'''
 def get_version(address):
     version, _ = bech32_decode(address)
     if version is None:
         version = b58decode_check(address)[:1]
-    if version in (MAIN_PUBKEY_HASH, MAIN_SCRIPT_HASH) or version in BECH32_MAIN_VERSION_SET:
-        return 'main'
-    elif version in (TEST_PUBKEY_HASH, TEST_SCRIPT_HASH) or version in BECH32_TEST_VERSION_SET:
-        return 'test'
+    for v, obj in COINS_INFO_MAP.items():
+        if version == obj['PUBKEY_HASH'] or version == obj['SCRIPT_HASH']:
+            return v
+        if str(version) in obj['BECH32_PREFIX_SET']:
+            return v
+    raise ValueError('{} does not correspond to a mainnet nor testnet address.'.format(version))
+
+'''get private key version by prefix byte'''
+def get_key_version(prefix_byte):
+    if prefix_byte in PREFIX_TO_VERSION:
+        return PREFIX_TO_VERSION[prefix_byte]
     else:
-        raise ValueError('{} does not correspond to a mainnet nor testnet address.'.format(version))
+        raise ValueError('{} not a valid private key.'.format(prefix_byte))
+
+'''get prefix byte by private key version'''
+def get_key_prefix(version:str):
+    if version in COINS_INFO_MAP:
+        return COINS_INFO_MAP[version]['PRIVATE_KEY_PREFIX']
+    else:
+        raise ValueError('{} not a valid coin version.'.format(version))
+
+'''get public key hash by private key version'''
+def get_pubkey_hash_key(version:str):
+    if version in COINS_INFO_MAP:
+        return COINS_INFO_MAP[version]['PUBKEY_HASH']
+    else:
+        raise ValueError('{} not a valid coin version.'.format(version))
+
+'''get script hash by private key version'''
+def get_script_hash_key(version:str):
+    if version in COINS_INFO_MAP:
+        return COINS_INFO_MAP[version]['SCRIPT_HASH']
+    else:
+        raise ValueError('{} not a valid coin version.'.format(version))
 
 
 def bytes_to_wif(private_key, version='main', compressed=False):
-
-    if version == 'test':
-        prefix = TEST_PRIVATE_KEY
-    else:
-        prefix = MAIN_PRIVATE_KEY
-
+    prefix = get_key_prefix(version)
     if compressed:
-        suffix = PRIVATE_KEY_COMPRESSED_PUBKEY
+        suffix = COINS_INFO_MAP[version]['PRIVATE_KEY_COMPRESSED_PUBKEY']
     else:
         suffix = b''
 
@@ -75,17 +92,10 @@ def wif_to_bytes(wif):
 
     private_key = b58decode_check(wif)
 
-    version = private_key[:1]
-
-    if version == MAIN_PRIVATE_KEY:
-        version = 'main'
-    elif version == TEST_PRIVATE_KEY:
-        version = 'test'
-    else:
-        raise ValueError('{} does not correspond to a mainnet nor testnet address.'.format(version))
+    version = get_key_version(private_key[:1])
 
     # Remove version byte and, if present, compression flag.
-    if len(wif) == 52 and private_key[-1] == 1:
+    if len(wif) == 52 and private_key[-1:] == COINS_INFO_MAP[version]['PRIVATE_KEY_COMPRESSED_PUBKEY']:
         private_key, compressed = private_key[1:-1], True
     else:
         private_key, compressed = private_key[1:], False
@@ -100,7 +110,7 @@ def wif_checksum_check(wif):
     except ValueError:
         return False
 
-    if decoded[:1] in (MAIN_PRIVATE_KEY, TEST_PRIVATE_KEY):
+    if decoded[:1] in PREFIX_TO_VERSION:
         return True
 
     return False
@@ -108,10 +118,7 @@ def wif_checksum_check(wif):
 
 def public_key_to_address(public_key, version='main'):
 
-    if version == 'test':
-        version = TEST_PUBKEY_HASH
-    else:
-        version = MAIN_PUBKEY_HASH
+    version = get_pubkey_hash_key(version)
 
     length = len(public_key)
 
@@ -123,10 +130,7 @@ def public_key_to_address(public_key, version='main'):
 
 def public_key_to_segwit_address(public_key, version='main'):
 
-    if version == 'test':
-        version = TEST_SCRIPT_HASH
-    else:
-        version = MAIN_SCRIPT_HASH
+    version = get_script_hash_key(version)
 
     length = len(public_key)
 
@@ -164,19 +168,13 @@ def multisig_to_redeemscript(public_keys, m):
 
 
 def multisig_to_address(public_keys, m, version='main'):
-    if version == 'test':
-        version = TEST_SCRIPT_HASH
-    else:
-        version = MAIN_SCRIPT_HASH
+    version = get_script_hash_key(version)
 
     return b58encode_check(version + ripemd160_sha256(multisig_to_redeemscript(public_keys, m)))
 
 
 def multisig_to_segwit_address(public_keys, m, version='main'):
-    if version == 'test':
-        version = TEST_SCRIPT_HASH
-    else:
-        version = MAIN_SCRIPT_HASH
+    version = get_script_hash_key(version)
 
     return b58encode_check(version + ripemd160_sha256(b'\x00\x20' + sha256(multisig_to_redeemscript(public_keys, m))))
 

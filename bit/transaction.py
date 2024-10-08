@@ -47,6 +47,7 @@ from bit.constants import (
     OP_RETURN,
     OP_EQUAL,
     MESSAGE_LIMIT,
+    COINS_INFO_MAP,
 )
 
 
@@ -461,12 +462,12 @@ def address_to_scriptpubkey(address):
     except ValueError:
         witver, data = segwit_decode(address)
         return segwit_scriptpubkey(witver, data)
-
-    if version == MAIN_PUBKEY_HASH or version == TEST_PUBKEY_HASH:
-        return OP_DUP + OP_HASH160 + OP_PUSH_20 + address_to_public_key_hash(address) + OP_EQUALVERIFY + OP_CHECKSIG
-    elif version == MAIN_SCRIPT_HASH or version == TEST_SCRIPT_HASH:
-        return OP_HASH160 + OP_PUSH_20 + address_to_public_key_hash(address) + OP_EQUAL
-
+    
+    for v, info in COINS_INFO_MAP.items():
+        if version == info['PUBKEY_HASH']:
+            return OP_DUP + OP_HASH160 + OP_PUSH_20 + address_to_public_key_hash(address) + OP_EQUALVERIFY + OP_CHECKSIG
+        elif version == info['SCRIPT_HASH']:
+            return OP_HASH160 + OP_PUSH_20 + address_to_public_key_hash(address) + OP_EQUAL
 
 def construct_outputs(outputs):
     outputs_obj = []

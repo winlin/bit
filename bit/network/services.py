@@ -113,7 +113,18 @@ class BlockchairAPI:
     TEST_ADDRESS_API = TEST_ENDPOINT + 'dashboards/address/{}'
     TEST_TX_PUSH_API = TEST_ENDPOINT + 'push/transaction'
     TEST_TX_API = TEST_ENDPOINT + 'raw/transaction/{}'
+    LTC_ENDPOINT = 'https://api.blockchair.com/litecoin/'
+    LTC_ADDRESS_API = LTC_ENDPOINT + 'dashboards/address/{}'
+    LTC_TX_PUSH_API = LTC_ENDPOINT + 'push/transaction'
+    LTC_TRX_API = LTC_ENDPOINT + 'dashboards/transaction/{}'
+    DOGE_ENDPOINT = 'https://api.blockchair.com/dogecoin/'
+    DOGE_ADDRESS_API = DOGE_ENDPOINT + 'dashboards/address/{}'
+    DOGE_TX_PUSH_API = DOGE_ENDPOINT + 'push/transaction'
+    DOGE_TRX_API = DOGE_ENDPOINT + 'dashboards/transaction/{}'
+
     TX_PUSH_PARAM = 'data'
+
+    API_KEY = None # API_KEY = 'A___BZt7oFyvgLKe7BJSKIULC9pBnlRX' # btc免费不需要使用key，ltc/doge需要key
 
     @classmethod
     def get_balance(cls, address):
@@ -128,46 +139,31 @@ class BlockchairAPI:
         if r.status_code != 200:  # pragma: no cover
             raise ConnectionError
         return r.json()['data'][address]['address']['balance']
-
+    
     @classmethod
     def get_transactions(cls, address):
-        endpoint = cls.MAIN_ADDRESS_API
-
-        transactions = []
-        offset = 0
-        txs_per_page = 1000
-        payload = {'offset': str(offset), 'limit': str(txs_per_page)}
-
-        r = requests.get(endpoint.format(address), params=payload, timeout=DEFAULT_TIMEOUT)
-        if r.status_code == 404:  # pragma: no cover
-            return []
-        if r.status_code != 200:  # pragma: no cover
-            raise ConnectionError
-        response = r.json()
-        response = response['data'][address]
-        total_txs = response['address']['transaction_count']
-
-        while total_txs > 0:
-            transactions.extend(tx for tx in response['transactions'])
-
-            total_txs -= txs_per_page
-            offset += txs_per_page
-            payload['offset'] = str(offset)
-            r = requests.get(endpoint.format(address), params=payload, timeout=DEFAULT_TIMEOUT)
-            if r.status_code != 200:  # pragma: no cover
-                raise ConnectionError
-            response = r.json()['data'][address]
-
-        return transactions
+        return cls.get_transactions_impl(address, cls.MAIN_ADDRESS_API)
 
     @classmethod
     def get_transactions_testnet(cls, address):
-        endpoint = cls.TEST_ADDRESS_API
+        return cls.get_transactions_impl(address, cls.TEST_ADDRESS_API)
+    
+    @classmethod
+    def get_transactions_doge(cls, address):
+        return cls.get_transactions_impl(address, cls.DOGE_ADDRESS_API, cls.API_KEY)
 
+    @classmethod
+    def get_transactions_ltc(cls, address):
+        return cls.get_transactions_impl(address, cls.LTC_ADDRESS_API, cls.API_KEY)
+        
+    @classmethod
+    def get_transactions_impl(cls, address, endpoint, apiKey=None, limit=100):
         transactions = []
         offset = 0
-        txs_per_page = 1000
-        payload = {'offset': str(offset), 'limit': str(txs_per_page)}
+        txs_per_page = 1000 if limit > 1000 else limit
+        payload = {'offset': str(offset), 'limit': str(txs_per_page), 'transaction_details': True}
+        if apiKey:
+            payload['key'] = apiKey
 
         r = requests.get(endpoint.format(address), params=payload, timeout=DEFAULT_TIMEOUT)
         if r.status_code == 404:  # pragma: no cover
@@ -175,11 +171,14 @@ class BlockchairAPI:
         if r.status_code != 200:  # pragma: no cover
             raise ConnectionError
         response = r.json()
+        context = response['context']
         response = response['data'][address]
         total_txs = response['address']['transaction_count']
 
         while total_txs > 0:
             transactions.extend(tx for tx in response['transactions'])
+            if len(transactions) >= limit:
+                break
 
             total_txs -= txs_per_page
             offset += txs_per_page
@@ -188,7 +187,9 @@ class BlockchairAPI:
             if r.status_code != 200:  # pragma: no cover
                 raise ConnectionError
             response = r.json()['data'][address]
-
+        
+        if transactions:
+            transactions[0]['context'] = context
         return transactions
 
     @classmethod
@@ -216,58 +217,59 @@ class BlockchairAPI:
         if not response:  # pragma: no cover
             return None
         return response[txid]['raw_transaction']
+    
+    @classmethod
+    def get_trx_doge(cls, txid):
+        r = requests.get(cls.DOGE_TRX_API.format(txid), timeout=DEFAULT_TIMEOUT)
+        if r.status_code == 404:  # pragma: no cover
+            return None
+        if r.status_code != 200:  # pragma: no cover
+            raise ConnectionError
+
+        response = r.json()['data']
+        if not response:  # pragma: no cover
+            return None
+        return response[txid]['transaction']
+    
+    @classmethod
+    def get_trx_ltc(cls, txid):
+        r = requests.get(cls.LTC_TRX_API.format(txid), timeout=DEFAULT_TIMEOUT)
+        if r.status_code == 404:  # pragma: no cover
+            return None
+        if r.status_code != 200:  # pragma: no cover
+            raise ConnectionError
+
+        response = r.json()['data']
+        if not response:  # pragma: no cover
+            return None
+        return response[txid]['transaction']
 
     @classmethod
     def get_unspent(cls, address):
-        endpoint = cls.MAIN_ADDRESS_API
+        return cls.get_unspent_impl(address, cls.MAIN_ADDRESS_API)
+
+    @classmethod
+    def get_unspent_testnet(cls, address):
+        return cls.get_unspent_impl(address, cls.TEST_ADDRESS_API)
+
+    @classmethod
+    def get_unspent_ltc(cls, address):
+        return cls.get_unspent_impl(address, cls.LTC_ADDRESS_API, cls.API_KEY)
+    
+    @classmethod
+    def get_unspent_doge(cls, address):
+        return cls.get_unspent_impl(address, cls.DOGE_ADDRESS_API, cls.API_KEY)
+
+    @classmethod
+    def get_unspent_impl(cls, address, api_endpoint, apikey=None):
+        endpoint = api_endpoint
 
         unspents = []
         offset = 0
         unspents_per_page = 1000
         payload = {'offset': str(offset), 'limit': str(unspents_per_page)}
-
-        r = requests.get(endpoint.format(address), params=payload, timeout=DEFAULT_TIMEOUT)
-        if r.status_code == 404:  # pragma: no cover
-            return None
-        if r.status_code != 200:  # pragma: no cover
-            raise ConnectionError
-        response = r.json()
-
-        block_height = response['context']['state']
-        response = response['data'][address]
-        script_pubkey = response['address']['script_hex']
-        total_unspents = response['address']['unspent_output_count']
-
-        while total_unspents > 0:
-            unspents.extend(
-                Unspent(
-                    utxo['value'],
-                    block_height - utxo['block_id'] + 1 if utxo['block_id'] != -1 else 0,
-                    script_pubkey,
-                    utxo['transaction_hash'],
-                    utxo['index'],
-                )
-                for utxo in response['utxo']
-            )
-
-            total_unspents -= unspents_per_page
-            offset += unspents_per_page
-            payload['offset'] = str(offset)
-            r = requests.get(endpoint.format(address), params=payload, timeout=DEFAULT_TIMEOUT)
-            if r.status_code != 200:  # pragma: no cover
-                raise ConnectionError
-            response = r.json()['data'][address]
-
-        return unspents
-
-    @classmethod
-    def get_unspent_testnet(cls, address):
-        endpoint = cls.TEST_ADDRESS_API
-
-        unspents = []
-        offset = 0
-        unspents_per_page = 1000
-        payload = {'offset': str(offset), 'limit': unspents_per_page}
+        if apikey:
+            payload['key'] = apikey
 
         r = requests.get(endpoint.format(address), params=payload, timeout=DEFAULT_TIMEOUT)
         if r.status_code == 404:  # pragma: no cover
@@ -313,6 +315,20 @@ class BlockchairAPI:
     @classmethod
     def broadcast_tx_testnet(cls, tx_hex):  # pragma: no cover
         r = requests.post(cls.TEST_TX_PUSH_API, data={cls.TX_PUSH_PARAM: tx_hex}, timeout=DEFAULT_TIMEOUT)
+        return True if r.status_code == 200 else False
+
+    @classmethod
+    def broadcast_tx_ltc(
+        cls, tx_hex,
+    ):  # pragma: no cover
+        r = requests.post(cls.LTC_TX_PUSH_API, data={cls.TX_PUSH_PARAM: tx_hex, 'key': cls.API_KEY}, timeout=DEFAULT_TIMEOUT)
+        return True if r.status_code == 200 else False
+    
+    @classmethod
+    def broadcast_tx_doge(
+        cls, tx_hex,
+    ):  # pragma: no cover
+        r = requests.post(cls.DOGE_TX_PUSH_API, data={cls.TX_PUSH_PARAM: tx_hex, 'key': cls.API_KEY}, timeout=DEFAULT_TIMEOUT)
         return True if r.status_code == 200 else False
 
 
@@ -943,6 +959,141 @@ class SmartbitAPI:
         r = requests.post(cls.TEST_TX_PUSH_API, json={cls.TX_PUSH_PARAM: tx_hex}, timeout=DEFAULT_TIMEOUT)
         return True if r.status_code == 200 else False
 
+class OKLinkAPI:
+    TIMEOUT = 10
+    API_KEY = '28fe64a6-fc35-4653-a7f3-a08488d38f80'
+    API_INTERVAL = 1 # oklink限制每秒钟最多5个api请求, 这里设定每个请求至少间隔1秒
+
+    @classmethod
+    def get_block_list(cls, chainShortName, limit=1):
+        endpoint = "https://www.oklink.com/api/v5/explorer/block/block-list"
+        headers = {"OK-Access-Key": cls.API_KEY}
+
+        payload = {'limit': str(limit), 'chainShortName': chainShortName}
+
+        r = requests.get(endpoint, params=payload, timeout=DEFAULT_TIMEOUT, headers=headers)
+        if r.status_code == 404:  # pragma: no cover
+            return None
+        if r.status_code != 200:  # pragma: no cover
+            raise ConnectionError
+        response = r.json()
+        if int(response.get('code', 1)) != 0 or response.get('msg', ''):# not 0
+            return None
+        return response['data'][0]['blockList']
+
+    @classmethod
+    def get_transactions_ltc(cls, address):
+        return cls.get_transactions_impl('ltc', address)
+
+    @classmethod
+    def get_transactions_doge(cls, address):
+        return cls.get_transactions_impl('doge', address)
+
+    @classmethod
+    def get_transactions_impl(cls, chainShortName, address):
+        height = int(cls.get_block_list(chainShortName, 1)[0]['height'])
+        
+        endpoint = "https://www.oklink.com/api/v5/explorer/address/transaction-list"
+        headers = {"OK-Access-Key": cls.API_KEY}
+
+        unspents = []
+        page = 1
+        unspents_per_page = 100
+        payload = {'page': str(page), 'limit': str(unspents_per_page), 'chainShortName': chainShortName, 'address': address}
+
+        r = requests.get(endpoint, params=payload, timeout=DEFAULT_TIMEOUT, headers=headers)
+        if r.status_code == 404:  # pragma: no cover
+            return None
+        if r.status_code != 200:  # pragma: no cover
+            raise ConnectionError
+        response = r.json()
+        if int(response.get('code', 1)) != 0 or response.get('msg', ''):# not 0
+            return None
+        transactions = response['data'][0]['transactionLists']
+        if transactions:
+            transactions[0]['context'] = {'state': height}
+        return transactions
+
+    @classmethod
+    def get_unspent_ltc(cls, address):
+        return cls.get_unspent_impl('ltc', 1e8, address)
+    
+    @classmethod
+    def get_unspent_doge(cls, address):
+        return cls.get_unspent_impl('doge', 1e8, address)
+
+    @classmethod
+    def get_unspent_impl(cls, chainShortName, precision, address):
+        endpoint = "https://www.oklink.com/api/v5/explorer/address/utxo"
+        headers = {"OK-Access-Key": cls.API_KEY}
+
+        unspents = []
+        page = 1
+        unspents_per_page = 100
+        payload = {'page': str(page), 'limit': str(unspents_per_page), 'chainShortName': chainShortName, 'address': address}
+
+        height = int(cls.get_block_list(chainShortName, 1)[0]['height'])
+        r = requests.get(endpoint, params=payload, timeout=DEFAULT_TIMEOUT, headers=headers)
+        if r.status_code == 404:  # pragma: no cover
+            return None
+        if r.status_code != 200:  # pragma: no cover
+            raise ConnectionError
+        response = r.json()
+        if int(response.get('code', 1)) != 0 or response.get('msg', ''):# not 0
+            return None
+        response = response['data'][0]
+        totalPage = int(response['totalPage'])
+        script_pubkey = bytes_to_hex(address_to_scriptpubkey(address))
+
+        while page <= totalPage:
+            unspents.extend(
+                Unspent(
+                    int(Decimal(utxo['unspentAmount'])*Decimal(precision)),
+                    height-int(utxo['height'])+1 if utxo['height'] and int(utxo['height']) > 0 else 0,
+                    script_pubkey,
+                    utxo['txid'],
+                    int(utxo['index']),
+                )
+                for utxo in response['utxoList']
+            )
+
+            page += 1
+            payload['page'] = str(page)
+            r = requests.get(endpoint, params=payload, timeout=DEFAULT_TIMEOUT, headers=headers)
+            if r.status_code != 200:  # pragma: no cover
+                raise ConnectionError
+            response = r.json()
+            if int(response.get('code', 1)) != 0 or response.get('msg', ''):# not 0
+                return None
+            response = response['data']
+        return unspents
+    
+    @classmethod
+    def broadcast_tx_ltc(cls, signedTx):
+        return cls.broadcast_tx_impl('ltc', signedTx)
+    
+    @classmethod
+    def broadcast_tx_doge(cls, signedTx):
+        return cls.broadcast_tx_impl('doge', signedTx)
+    
+    @classmethod
+    def broadcast_tx_impl(cls, chainShortName, signedTx):
+        endpoint = "https://www.oklink.com/api/v5/explorer/transaction/publish-tx"
+        headers = {"OK-Access-Key": cls.API_KEY}
+        payload = {
+            'chainShortName': chainShortName,
+            'signedTx': signedTx,
+        }
+        r = requests.post(endpoint, json=payload, timeout=DEFAULT_TIMEOUT, headers=headers)
+        if r.status_code == 404:  # pragma: no cover
+            return None
+        if r.status_code != 200:  # pragma: no cover
+            raise ConnectionError
+        response = r.json()
+        if int(response.get('code', 1)) != 0 or response.get('msg', ''):# not 0
+            return None
+        result = response['data']
+        return result[0]['txid'] if result else ''
 
 class NetworkAPI:
     IGNORED_ERRORS = (
@@ -1015,6 +1166,88 @@ class NetworkAPI:
         BitcoreAPI.broadcast_tx_testnet,
         SmartbitAPI.broadcast_tx_testnet,  # Limit 5/minute
     ]
+
+
+    # litecoin
+    GET_BALANCE_LTC = [
+    ]
+    GET_TRANSACTIONS_LTC = [
+        OKLinkAPI.get_transactions_ltc,
+        OKLinkAPI.get_transactions_ltc,
+        OKLinkAPI.get_transactions_ltc,
+        # BlockchairAPI.get_transactions_ltc
+    ]
+    GET_TRANSACTION_BY_ID_LTC = [
+        # BlockchairAPI.get_trx_ltc
+    ]
+    GET_UNSPENT_LTC = [
+        OKLinkAPI.get_unspent_ltc,
+        OKLinkAPI.get_unspent_ltc,
+        OKLinkAPI.get_unspent_ltc,
+        # BlockchairAPI.get_unspent_ltc,
+    ]
+    BROADCAST_TX_LTC = [
+        OKLinkAPI.broadcast_tx_ltc,
+        OKLinkAPI.broadcast_tx_ltc,
+        OKLinkAPI.broadcast_tx_ltc,
+        # BlockchairAPI.broadcast_tx_ltc
+    ]
+
+    # dogecoin
+    GET_BALANCE_DOGE = [
+    ]
+    GET_TRANSACTIONS_DOGE = [
+        OKLinkAPI.get_transactions_doge,
+        OKLinkAPI.get_transactions_doge,
+        OKLinkAPI.get_transactions_doge,
+        # BlockchairAPI.get_transactions_doge,
+    ]
+    GET_TRANSACTION_BY_ID_DOGE = [
+        # BlockchairAPI.get_trx_doge
+    ]
+    GET_UNSPENT_DOGE = [
+        OKLinkAPI.get_unspent_doge,
+        OKLinkAPI.get_unspent_doge,
+        OKLinkAPI.get_unspent_doge,
+        # BlockchairAPI.get_unspent_doge,
+    ]
+    BROADCAST_TX_DOGE = [
+        OKLinkAPI.broadcast_tx_doge,
+        OKLinkAPI.broadcast_tx_doge,
+        OKLinkAPI.broadcast_tx_doge,
+        # BlockchairAPI.broadcast_tx_doge,
+    ]
+
+    COINS_API = {
+        'main': {
+            'GET_BALANCE': GET_BALANCE_MAIN,
+            'GET_TRANSACTIONS': GET_TRANSACTIONS_MAIN,
+            'GET_TRANSACTION_BY_ID': GET_TRANSACTION_BY_ID_MAIN,
+            'GET_UNSPENT': GET_UNSPENT_MAIN,
+            'BROADCAST_TX': BROADCAST_TX_MAIN,
+        },
+        'test': {
+            'GET_BALANCE': GET_BALANCE_TEST,
+            'GET_TRANSACTIONS': GET_TRANSACTIONS_TEST,
+            'GET_TRANSACTION_BY_ID': GET_TRANSACTION_BY_ID_TEST,
+            'GET_UNSPENT': GET_UNSPENT_TEST,
+            'BROADCAST_TX': BROADCAST_TX_TEST,
+        },
+        'ltc': {
+            'GET_BALANCE': GET_BALANCE_LTC,
+            'GET_TRANSACTIONS': GET_TRANSACTIONS_LTC,
+            'GET_TRANSACTION_BY_ID': GET_TRANSACTION_BY_ID_LTC,
+            'GET_UNSPENT': GET_UNSPENT_LTC,
+            'BROADCAST_TX': BROADCAST_TX_LTC,
+        },
+        'doge': {
+            'GET_BALANCE': GET_BALANCE_DOGE,
+            'GET_TRANSACTIONS': GET_TRANSACTIONS_DOGE,
+            'GET_TRANSACTION_BY_ID': GET_TRANSACTION_BY_ID_DOGE,
+            'GET_UNSPENT': GET_UNSPENT_DOGE,
+            'BROADCAST_TX': BROADCAST_TX_DOGE,
+        }
+    }
 
     @classmethod
     def connect_to_node(cls, user, password, host='localhost', port=8332, use_https=False, testnet=False, path=""):
@@ -1092,6 +1325,26 @@ class NetworkAPI:
                 pass
 
         raise ConnectionError('All APIs are unreachable.')
+    
+    @classmethod
+    def get_balance_coin(cls, version, address):
+        """Gets the balance of an address in satoshi.
+
+        :param address: The address in question.
+        :type address: ``str``
+        :raises ConnectionError: If all API services fail.
+        :rtype: ``int``
+        """
+
+        for api_call in cls.COINS_API[version]['GET_BALANCE']:
+            try:
+                return api_call(address)
+            except cls.IGNORED_ERRORS:
+                pass
+            except Exception as e:
+                print('get_balance_coin', version, address, e)
+
+        raise ConnectionError('All APIs are unreachable.')
 
     @classmethod
     def get_transactions(cls, address):
@@ -1129,9 +1382,29 @@ class NetworkAPI:
                 pass
 
         raise ConnectionError('All APIs are unreachable.')
+    
+    @classmethod
+    def get_transactions_coin(cls, version, address):
+        """Gets the ID of all transactions related to an address.
+
+        :param address: The address in question.
+        :type address: ``str``
+        :raises ConnectionError: If all API services fail.
+        :rtype: ``list`` of ``str``
+        """
+
+        for api_call in cls.COINS_API[version]['GET_TRANSACTIONS']:
+            try:
+                return api_call(address)
+            except cls.IGNORED_ERRORS:
+                pass
+            except Exception as e:
+                print('get_transactions_coin', version, address, e)
+
+        raise ConnectionError('All APIs are unreachable.')
 
     @classmethod
-    def get_transaction_by_id(cls, txid):
+    def get_transaction_by_id(cls, version, txid):
         """Gets a raw transaction hex by its transaction id (txid).
 
         :param txid: The id of the transaction
@@ -1140,7 +1413,7 @@ class NetworkAPI:
         :rtype: ``string``
         """
 
-        for api_call in cls.GET_TRANSACTION_BY_ID_MAIN:
+        for api_call in cls.COINS_API[version]['GET_TRANSACTION_BY_ID']:
             try:
                 return api_call(txid)
             except cls.IGNORED_ERRORS:
@@ -1163,6 +1436,26 @@ class NetworkAPI:
                 return api_call(txid)
             except cls.IGNORED_ERRORS:
                 pass
+
+        raise ConnectionError('All APIs are unreachable.')
+    
+    @classmethod
+    def get_transaction_by_id_coin(cls, version, txid):
+        """Gets a raw transaction hex by its transaction id (txid).
+
+        :param txid: The id of the transaction
+        :type txid: ``str``
+        :raises ConnectionError: If all API services fail.
+        :rtype: ``string``
+        """
+
+        for api_call in cls.COINS_API[version]['GET_TRANSACTION_BY_ID']:
+            try:
+                return api_call(txid)
+            except cls.IGNORED_ERRORS:
+                pass
+            except Exception as e:
+                print('get_transaction_by_id_coin', version, txid, e)
 
         raise ConnectionError('All APIs are unreachable.')
 
@@ -1200,6 +1493,25 @@ class NetworkAPI:
                 return api_call(address)
             except cls.IGNORED_ERRORS:
                 pass
+
+        raise ConnectionError('All APIs are unreachable.')
+    
+    @classmethod
+    def get_unspent_coin(cls, version, address):
+        """Gets all unspent transaction outputs belonging to an address.
+
+        :param address: The address in question.
+        :type address: ``str``
+        :raises ConnectionError: If all API services fail.
+        :rtype: ``list`` of :class:`~bit.network.meta.Unspent`
+        """
+        for api_call in cls.COINS_API[version]['GET_UNSPENT']:
+            try:
+                return api_call(address)
+            except cls.IGNORED_ERRORS:
+                pass
+            except Exception as e:
+                print('get_unspent_coin', version, address, e)
 
         raise ConnectionError('All APIs are unreachable.')
 
@@ -1248,5 +1560,31 @@ class NetworkAPI:
 
         if success is False:
             raise ConnectionError('Transaction broadcast failed, or Unspents were already used.')
+
+        raise ConnectionError('All APIs are unreachable.')
+    
+    @classmethod
+    def broadcast_tx_coin(cls, version, tx_hex):  # pragma: no cover
+        """Broadcasts a transaction to the blockchain.
+
+        :param tx_hex: A signed transaction in hex form.
+        :type tx_hex: ``str``
+        :raises ConnectionError: If all API services fail.
+        """
+        success = None
+
+        for api_call in cls.COINS_API[version]['BROADCAST_TX']:
+            try:
+                success = api_call(tx_hex)
+                if not success:
+                    continue
+                return
+            except cls.IGNORED_ERRORS:
+                pass
+            except Exception as e:
+                print('broadcast_tx_coin', version, address, e)
+
+        if success is False:
+            raise ConnectionError(str(version) + ' Transaction broadcast failed, or Unspents were already used.')
 
         raise ConnectionError('All APIs are unreachable.')

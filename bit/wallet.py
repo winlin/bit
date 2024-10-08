@@ -11,6 +11,7 @@ from bit.format import (
     multisig_to_redeemscript,
     public_key_to_segwit_address,
     multisig_to_segwit_address,
+    get_key_prefix,
 )
 from bit.network import NetworkAPI, get_fee_cached, satoshi_to_currency_cached
 from bit.network.meta import Unspent
@@ -35,12 +36,16 @@ def wif_to_key(wif):
             return PrivateKey.from_bytes(private_key_bytes)
         else:
             return PrivateKey(wif)
-    else:
+    elif version == 'test':
         if compressed:
             return PrivateKeyTestnet.from_bytes(private_key_bytes)
         else:
             return PrivateKeyTestnet(wif)
-
+    else:
+        if compressed:
+            return PrivateKeyCoins.from_bytes(version, private_key_bytes)
+        else:
+            return PrivateKeyCoins(version, wif)
 
 class BaseKey:
     """This class represents a point on the elliptic curve secp256k1 and
@@ -1589,3 +1594,397 @@ class MultiSigTestnet:
 
     def __repr__(self):
         return '<MultiSigTestnet: {}>'.format(self.address)
+
+
+class PrivateKeyCoins(BaseKey):
+
+    def __init__(self, version, wif=None):
+        super().__init__(wif=wif)
+
+        get_key_prefix(version) # check if version is valid
+        self.version = version
+        self.instance = 'PrivateKeyCoins'
+
+        self._address = None
+        self._segwit_address = None
+        self._scriptcode = None
+        self._segwit_scriptcode = None
+
+        self.balance = 0
+        self.unspents = []
+        self.transactions = []
+
+    @property
+    def address(self):
+        """The public address you share with others to receive funds."""
+        if self._address is None:
+            self._address = public_key_to_address(self._public_key, version=self.version)
+        return self._address
+
+    @property
+    def segwit_address(self):
+        """The public segwit nested in P2SH address you share with others to
+        receive funds."""
+        return None # Segwit not supported for coins
+        # Only make segwit address if public key is compressed
+        if self._segwit_address is None and self.is_compressed():
+            self._segwit_address = public_key_to_segwit_address(self._public_key, version=self.version)
+        return self._segwit_address
+
+    @property
+    def scriptcode(self):
+        self._scriptcode = address_to_scriptpubkey(self.address)
+        return self._scriptcode
+
+    @property
+    def segwit_scriptcode(self):
+        self._segwit_scriptcode = OP_0 + OP_PUSH_20 + ripemd160_sha256(self.public_key)
+        return self._segwit_scriptcode
+
+    def can_sign_unspent(self, unspent):
+        script = bytes_to_hex(address_to_scriptpubkey(self.address))
+        if self.segwit_address:
+            segwit_script = bytes_to_hex(address_to_scriptpubkey(self.segwit_address))
+            return unspent.script == script or unspent.script == segwit_script
+        else:
+            return unspent.script == script
+
+    def to_wif(self):
+        return bytes_to_wif(self._pk.secret, version=self.version, compressed=self.is_compressed())
+
+    def balance_as(self, currency):
+        """Returns your balance as a formatted string in a particular currency.
+
+        :param currency: One of the :ref:`supported currencies`.
+        :type currency: ``str``
+        :rtype: ``str``
+        """
+        return satoshi_to_currency_cached(self.balance, currency)
+
+    def get_balance(self, currency='satoshi'):
+        """Fetches the current balance by calling
+        :func:`~bit.PrivateKeyTestnet.get_unspents` and returns it using
+        :func:`~bit.PrivateKeyTestnet.balance_as`.
+
+        :param currency: One of the :ref:`supported currencies`.
+        :type currency: ``str``
+        :rtype: ``str``
+        """
+        self.get_unspents()
+        return self.balance_as(currency)
+
+    def get_unspents(self):
+        """Fetches all available unspent transaction outputs.
+
+        :rtype: ``list`` of :class:`~bit.network.meta.Unspent`
+        """
+        self.unspents[:] = list(
+            map(
+                lambda u: u.set_type('p2pkh' if self.is_compressed() else 'p2pkh-uncompressed'),
+                NetworkAPI.get_unspent_coin(self.version ,self.address),
+            )
+        )
+        if self.segwit_address:
+            self.unspents += list(
+                map(lambda u: u.set_type('np2wkh'), NetworkAPI.get_unspent_coin(self.version ,self.segwit_address))
+            )
+        self.balance = sum(unspent.amount for unspent in self.unspents)
+        return self.unspents
+
+    def get_transactions(self):
+        """Fetches transaction history.
+
+        :rtype: ``list`` of ``str`` transaction IDs
+        """
+        self.transactions[:] = NetworkAPI.get_transactions_coin(self.version ,self.address)
+        if self.segwit_address:
+            self.transactions += NetworkAPI.get_transactions_coin(self.version ,self.segwit_address)
+        return self.transactions
+    
+    def get_transaction_by_id(self, txid):
+        return NetworkAPI.get_transaction_by_id(self.version, txid)
+
+    def create_transaction(
+        self,
+        outputs,
+        fee=None,
+        absolute_fee=False,
+        leftover=None,
+        combine=True,
+        message=None,
+        unspents=None,
+        message_is_hex=False,
+        replace_by_fee=False,
+    ):  # pragma: no cover
+        """Creates a signed P2PKH transaction.
+
+        :param outputs: A sequence of outputs you wish to send in the form
+                        ``(destination, amount, currency)``. The amount can
+                        be either an int, float, or string as long as it is
+                        a valid input to ``decimal.Decimal``. The currency
+                        must be :ref:`supported <supported currencies>`.
+        :type outputs: ``list`` of ``tuple``
+        :param fee: The number of satoshi per byte to pay to miners. By default
+                    Bit will poll `<https://mempool.space/api/v1/fees/recommended>`_ and use a fee
+                    that will allow your transaction to be confirmed as soon as
+                    possible.
+        :type fee: ``int``
+        :param leftover: The destination that will receive any change from the
+                         transaction. By default Bit will send any change to
+                         the same address you sent from.
+        :type leftover: ``str``
+        :param combine: Whether or not Bit should use all available UTXOs to
+                        make future transactions smaller and therefore reduce
+                        fees. By default Bit will consolidate UTXOs. Note: When
+                        setting :param absolute_fee: this is ignored.
+        :type combine: ``bool``
+        :param message: A message to include in the transaction. This will be
+                        stored in the blockchain forever. Due to size limits,
+                        each message will be stored in chunks of 40 bytes.
+        :type message: ``str``
+        :param unspents: The UTXOs to use as the inputs. By default Bit will
+                         communicate with the testnet blockchain itself.
+        :type unspents: ``list`` of :class:`~bit.network.meta.Unspent`
+        :param replace_by_fee: Whether to opt-in for replace-by-fee (BIP 125).
+        :type replace_by_fee: ``bool``
+        :returns: The signed transaction as hex.
+        :rtype: ``str``
+        """
+        try:
+            unspents = unspents or self.get_unspents()
+        except ConnectionError:
+            raise ConnectionError('All APIs are unreachable. Please provide the unspents to spend from directly.')
+
+        # If at least one input is from segwit the return address is for segwit
+        return_address = self.segwit_address if any([u.segwit for u in unspents]) else self.address
+
+        unspents, outputs = sanitize_tx_data(
+            unspents,
+            outputs,
+            fee or get_fee_cached(),
+            leftover or return_address,
+            combine=combine,
+            message=message,
+            absolute_fee=absolute_fee,
+            version=self.version,
+            message_is_hex=message_is_hex,
+            replace_by_fee=replace_by_fee,
+        )
+
+        return create_new_transaction(self, unspents, outputs)
+
+    def send(
+        self,
+        outputs,
+        fee=None,
+        absolute_fee=False,
+        leftover=None,
+        combine=True,
+        message=None,
+        unspents=None,
+        message_is_hex=False,
+        replace_by_fee=False,
+    ):  # pragma: no cover
+        """Creates a signed P2PKH transaction and attempts to broadcast it on
+        the testnet blockchain. This accepts the same arguments as
+        :func:`~bit.PrivateKeyTestnet.create_transaction`.
+
+        :param outputs: A sequence of outputs you wish to send in the form
+                        ``(destination, amount, currency)``. The amount can
+                        be either an int, float, or string as long as it is
+                        a valid input to ``decimal.Decimal``. The currency
+                        must be :ref:`supported <supported currencies>`.
+        :type outputs: ``list`` of ``tuple``
+        :param fee: The number of satoshi per byte to pay to miners. By default
+                    Bit will poll `<https://mempool.space/api/v1/fees/recommended>`_ and use a fee
+                    that will allow your transaction to be confirmed as soon as
+                    possible.
+        :type fee: ``int``
+        :param leftover: The destination that will receive any change from the
+                         transaction. By default Bit will send any change to
+                         the same address you sent from.
+        :type leftover: ``str``
+        :param combine: Whether or not Bit should use all available UTXOs to
+                        make future transactions smaller and therefore reduce
+                        fees. By default Bit will consolidate UTXOs. Note: When
+                        setting :param absolute_fee: this is ignored.
+        :type combine: ``bool``
+        :param message: A message to include in the transaction. This will be
+                        stored in the blockchain forever. Due to size limits,
+                        each message will be stored in chunks of 40 bytes.
+        :type message: ``str``
+        :param unspents: The UTXOs to use as the inputs. By default Bit will
+                         communicate with the testnet blockchain itself.
+        :type unspents: ``list`` of :class:`~bit.network.meta.Unspent`
+        :param replace_by_fee: Whether to opt-in for replace-by-fee (BIP 125).
+        :type replace_by_fee: ``bool``
+        :returns: The transaction ID.
+        :rtype: ``str``
+        """
+
+        tx_hex = self.create_transaction(
+            outputs,
+            fee=fee,
+            absolute_fee=absolute_fee,
+            leftover=leftover,
+            combine=combine,
+            message=message,
+            unspents=unspents,
+            message_is_hex=message_is_hex,
+            replace_by_fee=replace_by_fee,
+        )
+
+        NetworkAPI.broadcast_tx_coin(self.version ,tx_hex)
+
+        return calc_txid(tx_hex)
+
+    @classmethod
+    def prepare_transaction(
+        cls,
+        address,
+        outputs,
+        compressed=True,
+        fee=None,
+        absolute_fee=False,
+        leftover=None,
+        combine=True,
+        message=None,
+        unspents=None,
+        message_is_hex=False,
+        replace_by_fee=False,
+    ):  # pragma: no cover
+        """Prepares a P2PKH transaction for offline signing.
+
+        :param address: The address the funds will be sent from.
+        :type address: ``str``
+        :param outputs: A sequence of outputs you wish to send in the form
+                        ``(destination, amount, currency)``. The amount can
+                        be either an int, float, or string as long as it is
+                        a valid input to ``decimal.Decimal``. The currency
+                        must be :ref:`supported <supported currencies>`.
+        :type outputs: ``list`` of ``tuple``
+        :param compressed: Whether or not the ``address`` corresponds to a
+                           compressed public key. This influences the fee.
+        :type compressed: ``bool``
+        :param fee: The number of satoshi per byte to pay to miners. By default
+                    Bit will poll `<https://mempool.space/api/v1/fees/recommended>`_ and use a fee
+                    that will allow your transaction to be confirmed as soon as
+                    possible.
+        :type fee: ``int``
+        :param leftover: The destination that will receive any change from the
+                         transaction. By default Bit will send any change to
+                         the same address you sent from.
+        :type leftover: ``str``
+        :param combine: Whether or not Bit should use all available UTXOs to
+                        make future transactions smaller and therefore reduce
+                        fees. By default Bit will consolidate UTXOs. Note: When
+                        setting :param absolute_fee: this is ignored.
+        :type combine: ``bool``
+        :param message: A message to include in the transaction. This will be
+                        stored in the blockchain forever. Due to size limits,
+                        each message will be stored in chunks of 40 bytes.
+        :type message: ``str``
+        :param unspents: The UTXOs to use as the inputs. By default Bit will
+                         communicate with the blockchain itself.
+        :type unspents: ``list`` of :class:`~bit.network.meta.Unspent`
+        :param replace_by_fee: Whether to opt-in for replace-by-fee (BIP 125).
+        :type replace_by_fee: ``bool``
+        :returns: JSON storing data required to create an offline transaction.
+        :rtype: ``str``
+        """
+        unspents, outputs = sanitize_tx_data(
+            unspents or NetworkAPI.get_unspent_coin(self.version ,address),
+            outputs,
+            fee or get_fee_cached(),
+            leftover or address,
+            combine=combine,
+            message=message,
+            absolute_fee=absolute_fee,
+            version='test',
+            message_is_hex=message_is_hex,
+            replace_by_fee=replace_by_fee,
+        )
+
+        data = {'unspents': [unspent.to_dict() for unspent in unspents], 'outputs': outputs}
+
+        return json.dumps(data, separators=(',', ':'))
+
+    def sign_transaction(self, tx_data, unspents=None):  # pragma: no cover
+        """Creates a signed P2PKH transaction using previously prepared
+        transaction data.
+
+        :param tx_data: Hex-encoded transaction or output of :func:`~bit.Key.prepare_transaction`.
+        :type tx_data: ``str``
+        :param unspents: The UTXOs to use as the inputs. By default Bit will
+                         communicate with the blockchain itself.
+        :type unspents: ``list`` of :class:`~bit.network.meta.Unspent`
+        :returns: The signed transaction as hex.
+        :rtype: ``str``
+        """
+        try:  # Json-tx-data from :func:`~bit.Key.prepare_transaction`
+            data = json.loads(tx_data)
+            assert unspents is None
+
+            unspents = [Unspent.from_dict(unspent) for unspent in data['unspents']]
+            outputs = data['outputs']
+
+            return create_new_transaction(self, unspents, outputs)
+        except:  # May be hex-encoded transaction using batching:
+            try:
+                unspents = unspents or self.get_unspents()
+            except ConnectionError:
+                raise ConnectionError(
+                    'All APIs are unreachable. Please provide the unspent '
+                    'inputs as unspents directly to sign this transaction.'
+                )
+
+            tx_data = deserialize(tx_data)
+            return sign_tx(self, tx_data, unspents=unspents)
+
+    @classmethod
+    def from_hex(cls, version, hexed):
+        """
+        :param hexed: A private key previously encoded as hex.
+        :type hexed: ``str``
+        :rtype: :class:`~bit.PrivateKeyTestnet`
+        """
+        return PrivateKeyCoins(version, ECPrivateKey.from_hex(hexed))
+
+    @classmethod
+    def from_bytes(cls, version, bytestr):
+        """
+        :param bytestr: A private key previously encoded as hex.
+        :type bytestr: ``bytes``
+        :rtype: :class:`~bit.PrivateKeyTestnet`
+        """
+        return PrivateKeyCoins(version, ECPrivateKey(bytestr))
+
+    @classmethod
+    def from_der(cls, version, der):
+        """
+        :param der: A private key previously encoded as DER.
+        :type der: ``bytes``
+        :rtype: :class:`~bit.PrivateKeyTestnet`
+        """
+        return PrivateKeyCoins(version, ECPrivateKey.from_der(der))
+
+    @classmethod
+    def from_pem(cls, version, pem):
+        """
+        :param pem: A private key previously encoded as PEM.
+        :type pem: ``bytes``
+        :rtype: :class:`~bit.PrivateKeyTestnet`
+        """
+        return PrivateKeyCoins(version, ECPrivateKey.from_pem(pem))
+
+    @classmethod
+    def from_int(cls, version, num):
+        """
+        :param num: A private key in raw integer form.
+        :type num: ``int``
+        :rtype: :class:`~bit.PrivateKeyTestnet`
+        """
+        return PrivateKeyCoins(version, ECPrivateKey.from_int(num))
+
+    def __repr__(self):
+        return '<PrivateKeyCoins: {}>'.format(self.address)
