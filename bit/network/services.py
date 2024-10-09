@@ -676,7 +676,15 @@ class BitcoreAPI(InsightAPI):
             timeout=DEFAULT_TIMEOUT,
         )
         return True if r.status_code == 200 else False
+    
+    @classmethod
+    def get_transactions_impl(cls, chain, address):
+        endpoint = f"https://api.bitcore.io/api/{chain}/mainnet/address/{address}/txs"
 
+        r = requests.get(endpoint, timeout=DEFAULT_TIMEOUT)
+        if r.status_code != 200:  # pragma: no cover
+            raise ConnectionError
+        return r.json()
 
 class BlockchainAPI:
     ENDPOINT = 'https://blockchain.info/'
